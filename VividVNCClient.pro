@@ -45,6 +45,9 @@ unix:!win32 {
     QMAKE_LFLAGS += -Wl,--disable-new-dtags
     QMAKE_LFLAGS += -Wl,-rpath,$$QT_LIBDIR
 }
+
+win32:LIBS += -lws2_32
+
 win32 {
     MXE = /home/jack/dev/mxe
     TRIP = x86_64-w64-mingw32.static

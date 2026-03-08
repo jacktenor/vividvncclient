@@ -2,15 +2,27 @@
 
 #include <QByteArray>
 
+#include <cstring>
+
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <cstring>
+#endif
 
 #include <libssh2_sftp.h>
 
 bool SshCommandWorker::connectAndAuth(QString& err)
 {
+
+#ifdef Q_OS_WIN
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2,2), &wsa);
+#endif
+
     sockaddr_in sin{};
     sin.sin_family = AF_INET;
     sin.sin_port = htons((uint16_t)m_port);
@@ -70,10 +82,19 @@ void SshCommandWorker::disconnectNow()
         libssh2_session_free(m_session);
         m_session = nullptr;
     }
+
     if (m_sock >= 0) {
+#ifdef Q_OS_WIN
+        closesocket(m_sock);
+#else
         ::close(m_sock);
+#endif
         m_sock = -1;
     }
+
+#ifdef Q_OS_WIN
+    WSACleanup();
+#endif
 }
 
 void SshCommandWorker::start()
