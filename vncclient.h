@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QThread>
+#include <QPointer>
 #include <QImage>
 #include <QString>
 
@@ -36,10 +37,10 @@ signals:
     void connected();
     void disconnected();
     void clipboardTextReceived(const QString& text);
+    void serverNotReachable(const QString& host, int port, const QString& reason);
 
 private:
     class Worker;
     QThread m_thread;
-    Worker* m_worker{nullptr};
+    QPointer<Worker> m_worker{nullptr};
 };
-

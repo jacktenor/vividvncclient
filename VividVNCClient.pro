@@ -2,7 +2,7 @@ QT += core gui widgets network
 CONFIG += c++17
 
 TEMPLATE = app
-TARGET = VividVNCServer
+TARGET = VividVNCClient
 
 SOURCES += \
     applog.cpp \
@@ -11,6 +11,7 @@ SOURCES += \
     remotebrowserdialog.cpp \
     sftplistworker.cpp \
     sftptransferworker.cpp \
+    sshcommandworker.cpp \
     sshkeybootstrap.cpp \
     sshtunnel.cpp \
     vncclient.cpp \
@@ -22,6 +23,7 @@ HEADERS += \
     remotebrowserdialog.h \
     sftplistworker.h \
     sftptransferworker.h \
+    sshcommandworker.h \
     sshkeybootstrap.h \
     sshtunnel.h \
     vncclient.h \
@@ -37,14 +39,14 @@ unix:!win32 {
     LIBS += -lvncclient
     LIBS += -lqt6keychain -lssh2
 
-    QT_LIBDIR = /home/<USERNAME>/dev/qt/Qt/6.10.2/gcc_64/lib
+    QT_LIBDIR = /home/jack/dev/qt/Qt/6.10.2/gcc_64/lib
 
     # Force old-style DT_RPATH (searched BEFORE system dirs), not DT_RUNPATH
     QMAKE_LFLAGS += -Wl,--disable-new-dtags
     QMAKE_LFLAGS += -Wl,-rpath,$$QT_LIBDIR
 }
 win32 {
-    MXE = /home/<USERNAME>/dev/mxe
+    MXE = /home/jack/dev/mxe
     TRIP = x86_64-w64-mingw32.static
     PREFIX = $$MXE/usr/$$TRIP
 
@@ -53,9 +55,9 @@ win32 {
 
 
     # Windows MXE cross-compile build
-    INCLUDEPATH += /home/<USERNAME>/dev/mxe/usr/x86_64-w64-mingw32.static/include
-    INCLUDEPATH += /home/<USERNAME>/dev/mxe/usr/x86_64-w64-mingw32.static/include/qt6keychain
-    LIBS += -L/home/<USERNAME>/dev/mxe/usr/x86_64-w64-mingw32.static/lib
+    INCLUDEPATH += /home/jack/dev/mxe/usr/x86_64-w64-mingw32.static/include
+    INCLUDEPATH += /home/jack/dev/mxe/usr/x86_64-w64-mingw32.static/include/qt6keychain
+    LIBS += -L/home/jack/dev/mxe/usr/x86_64-w64-mingw32.static/lib
 
     # Main libraries
     LIBS += -lvncclient -lvncserver -lz
@@ -66,9 +68,9 @@ win32 {
     LIBS += -lgnutls
     LIBS += -lidn2
     LIBS += -lunistring
-    LIBS += /home/<USERNAME>/dev/mxe/usr/x86_64-w64-mingw32.static/lib/libnettle.a
+    LIBS += /home/jack/dev/mxe/usr/x86_64-w64-mingw32.static/lib/libnettle.a
 
-    LIBS += /home/<USERNAME>/dev/mxe/usr/x86_64-w64-mingw32.static/lib/libhogweed.a
+    LIBS += /home/jack/dev/mxe/usr/x86_64-w64-mingw32.static/lib/libhogweed.a
     LIBS += -lgmp -ltasn1
     LIBS += -lssl -lcrypto
 

@@ -1,14 +1,13 @@
 #include "mainwindow.h"
-
 #include "applog.h"
+#include <signal.h>
+
 #include <QApplication>
 #include <QIcon>
 #include <QPalette>
 #include <QColor>
-
 #include <QStyleFactory>
 #ifndef Q_OS_WIN
-#include <signal.h>
 #else
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

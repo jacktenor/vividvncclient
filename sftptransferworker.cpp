@@ -1,7 +1,10 @@
 #include "sftptransferworker.h"
+#include "qtimer.h"
 
 #include <QFile>
 #include <QFileInfo>
+#include <QEventLoop>
+#include <QTimer>
 
 #ifdef Q_OS_WIN
 #include <winsock2.h>
@@ -42,6 +45,8 @@ void SftpTransferWorker::setConnectionParams(const QString& host,
     m_passwordFallback = passwordFallback;
 }
 
+
+
 void SftpTransferWorker::setTransfer(Direction dir,
                                      const QString& localPath,
                                      const QString& remotePath)
@@ -53,25 +58,6 @@ void SftpTransferWorker::setTransfer(Direction dir,
 
 void SftpTransferWorker::cancel() {
     m_cancelled.storeRelease(1);
-}
-
-void SftpTransferWorker::start() {
-    m_cancelled.storeRelease(0);
-
-    QString err;
-    emit status("Connecting for SFTP...");
-
-    if (!connectAndAuth(err)) {
-        emit finished(false, err);
-        return;
-    }
-
-    bool ok = false;
-    if (m_dir == Direction::Upload) ok = runUpload(err);
-    else ok = runDownload(err);
-
-    disconnect();
-    emit finished(ok, ok ? QString() : err);
 }
 
 bool SftpTransferWorker::connectAndAuth(QString& err) {
@@ -281,6 +267,94 @@ bool SftpTransferWorker::runUpload(QString& err) {
     libssh2_sftp_close(rfile);
     emit status("Upload complete.");
     return true;
+}
+
+static bool sftpRemoteExists(LIBSSH2_SFTP* sftp,
+                             const QString& remotePath,
+                             quint64* outSize)
+{
+    if (!sftp) return false;
+
+    LIBSSH2_SFTP_ATTRIBUTES attrs{};
+    const QByteArray p = remotePath.toUtf8();
+
+    const int rc = libssh2_sftp_stat_ex(
+        sftp,
+        p.constData(),
+        (unsigned int)p.size(),
+        LIBSSH2_SFTP_STAT,
+        &attrs
+        );
+
+    if (rc == 0) {
+        if (outSize) {
+            if (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE)
+                *outSize = (quint64)attrs.filesize;
+            else
+                *outSize = 0;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void SftpTransferWorker::start()
+{
+    m_cancelled.storeRelease(0);
+
+    QString err;
+    emit status("Connecting for SFTP...");
+
+    if (!connectAndAuth(err)) {
+        emit finished(false, err);
+        return;
+    }
+
+    // Overwrite prompt for uploads
+    if (m_dir == Direction::Upload) {
+        quint64 existingSize = 0;
+
+        if (sftpRemoteExists((LIBSSH2_SFTP*)m_sftp, m_remotePath, &existingSize)) {
+            m_overwriteDecisionReady = false;
+            m_overwriteApproved = false;
+
+            emit overwritePrompt(m_remotePath, existingSize);
+
+            QEventLoop loop;
+            QTimer poll;
+            poll.setInterval(25);
+
+            connect(&poll, &QTimer::timeout, &loop, [&]() {
+                if (m_overwriteDecisionReady)
+                    loop.quit();
+            });
+
+            poll.start();
+            loop.exec();
+
+            if (!m_overwriteApproved) {
+                disconnect();
+                emit finished(false, "Upload cancelled (remote file exists).");
+                return;
+            }
+        }
+    }
+
+    bool ok = false;
+    if (m_dir == Direction::Upload)
+        ok = runUpload(err);
+    else
+        ok = runDownload(err);
+
+    disconnect();
+    emit finished(ok, ok ? QString() : err);
+}
+
+void SftpTransferWorker::setOverwriteDecision(bool overwrite)
+{
+    m_overwriteApproved = overwrite;
+    m_overwriteDecisionReady = true;
 }
 
 bool SftpTransferWorker::runDownload(QString& err) {

@@ -16,6 +16,11 @@
 
 #include "sftplistworker.h"
 
+// Item data roles
+static constexpr int kRolePath     = Qt::UserRole;
+static constexpr int kRoleIsDir    = Qt::UserRole + 1;
+static constexpr int kRoleIsCustom = Qt::UserRole + 20;
+
 class RemoteBrowserDialog : public QDialog {
     Q_OBJECT
 public:
@@ -49,6 +54,7 @@ private slots:
     void acceptSelection();
     void onSidebarItemClicked(QListWidgetItem* item);
     void showContextMenu(const QPoint& pos);
+    void showSidebarContextMenu(const QPoint& pos);
 
 private:
     QString joinPath(const QString& dir, const QString& name) const;
@@ -56,6 +62,14 @@ private:
     void rebuildBreadcrumbs(const QString& dir);
     QIcon iconForEntry(const RemoteEntry& e) const;
     QString humanSize(quint64 bytes) const;
+
+    // Persistent bookmarks
+    QString makeBookmarkSettingsKey() const;
+    void updateBuiltinBookmarks();
+    void clearCustomBookmarkItems();
+    void loadCustomBookmarks();
+    void saveCustomBookmarks() const;
+    void addCustomBookmark(const QString& label, const QString& path);
 
     // Toolbar
     QToolButton*  m_btnBack    = nullptr;
@@ -71,6 +85,15 @@ private:
     // Main content
     QSplitter*    m_splitter = nullptr;
     QListWidget*  m_sidebar  = nullptr;
+
+    // Built-in bookmark items
+    QListWidgetItem* m_bmRoot = nullptr;
+    QListWidgetItem* m_bmHome = nullptr;
+    QListWidgetItem* m_bmTmp = nullptr;
+    QListWidgetItem* m_bmDownloads = nullptr;
+
+    struct CustomBookmark { QString label; QString path; };
+    QVector<CustomBookmark> m_customBookmarks;
     QTreeWidget*  m_tree     = nullptr;
 
     // Bottom bar

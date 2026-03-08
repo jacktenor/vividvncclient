@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "vncview.h"
 #include "vncclient.h"
+#include "sshcommandworker.h"
 #include "sshkeybootstrap.h"
 #include "sshtunnel.h"
 #include "applog.h"
@@ -21,6 +22,8 @@
 #include <QComboBox>
 #include <QSettings>
 #include <QInputDialog>
+#include <QThread>
+#include <QTimer>
 #include <QMessageBox>
 #include <QSizePolicy>
 #include <QClipboard>
@@ -57,7 +60,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         background: transparent;
         image: url(:/icons/checkmark.png);
     }
-)");
+)");    
 
     // ---- TOP BAR (two rows) ----
     auto* topBar = new QVBoxLayout();
@@ -81,6 +84,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     m_host = new QLineEdit("127.0.0.1");
     m_port = new QLineEdit("5900");
+    m_serverFps = new QLineEdit("60");
+    m_serverFps->setFixedWidth(fm.horizontalAdvance("240") + 18);
+    m_serverFps->setPlaceholderText("FPS");
+
     m_host->setFixedWidth(fm.horizontalAdvance("255.255.255.255") + 20);
     m_port->setFixedWidth(fm.horizontalAdvance("65535") + 18);
 
@@ -143,6 +150,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     row1->addWidget(makeRow1Label("Port:"));
     row1->addSpacing(0);
     row1->addWidget(m_port);
+    row1->addWidget(new QLabel("Server FPS:"));
+    row1->addWidget(m_serverFps);
     row1->addSpacing(8);
 
     row1->addWidget(makeRow1Label("Password:"));
@@ -275,6 +284,27 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_status->setText("SFTP: " + s);
     });
 
+    connect(m_xferWorker, &SftpTransferWorker::overwritePrompt, this,
+            [this](const QString& remotePath, quint64 existingSize) {
+
+                const auto reply = QMessageBox::question(
+                    this,
+                    "Overwrite remote file?",
+                    QString("A file already exists at:\n%1\nExisting size: %2 bytes\nOverwrite it?")
+                        .arg(remotePath)
+                        .arg(QString::number((qulonglong)existingSize)),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No
+                    );
+
+                const bool overwrite = (reply == QMessageBox::Yes);
+
+                QMetaObject::invokeMethod(m_xferWorker,
+                                          "setOverwriteDecision",
+                                          Qt::QueuedConnection,
+                                          Q_ARG(bool, overwrite));
+            });
+
     connect(m_xferWorker, &SftpTransferWorker::progress, this, [this](qint64 done, qint64 total) {
         if (total <= 0) {
             m_xferBar->setMaximum(0);   // busy/indeterminate
@@ -283,7 +313,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (m_xferBar->maximum() == 0) m_xferBar->setMaximum(100);
         const int pct = (int)((done * 100) / total);
         m_xferBar->setValue(pct);
-        m_xferBar->setFormat(QString("%1%)").arg(pct).arg(done).arg(total));
+        m_xferBar->setFormat("%p%");
     });
 
     connect(m_xferWorker, &SftpTransferWorker::finished, this, [this](bool ok, const QString& err) {
@@ -322,16 +352,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         else
             remote = "/tmp/" + localName;
 
-        const QString host        = m_host->text().trimmed();
-        const int     sshPort     = m_sshPort->text().trimmed().toInt();
-        const QString keyPath     = m_sshKeyPath->text().trimmed();
-        const QString passFallback= m_sshPass->text();
+        // Confirm upload before starting
+        const auto reply = QMessageBox::question(
+            this,
+            "Confirm upload",
+            QString("Upload this file?\nLocal:\n%1\nRemote:\n%2")
+                .arg(local, remote),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes
+            );
+
+        if (reply != QMessageBox::Yes)
+            return;
+
+        const QString host         = m_host->text().trimmed();
+        const int     sshPort      = m_sshPort->text().trimmed().toInt();
+        const QString keyPath      = m_sshKeyPath->text().trimmed();
+        const QString passFallback = m_sshPass->text();
 
         m_uploadBtn->setEnabled(false);
         m_downloadBtn->setEnabled(false);
         m_cancelXferBtn->setEnabled(true);
         m_xferBar->setMaximum(100);
         m_xferBar->setValue(0);
+        m_xferBar->setFormat("%p%");
 
         m_xferWorker->setConnectionParams(host, sshPort, sshUser, keyPath, passFallback);
         m_xferWorker->setTransfer(SftpTransferWorker::Direction::Upload, local, remote);
@@ -371,7 +415,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (QFileInfo::exists(local)) {
             const auto r = QMessageBox::question(
                 this, "Overwrite?",
-                QString("This file already exists:\n\n%1\n\nOverwrite it?").arg(local),
+                QString("This file already exists:\n%1\nOverwrite it?").arg(local),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (r != QMessageBox::Yes) return;
         }
@@ -453,6 +497,41 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_cancelXferBtn->setEnabled(false);
     });
 
+    connect(m_client, &VncClient::serverNotReachable, this,
+            [this](const QString& /*host*/, int /*port*/, const QString& /*reason*/) {
+
+                if (m_serverStartDialogOpen || m_serverStartInProgress)
+                    return;
+
+                m_serverStartDialogOpen = true;
+
+                const int remoteVncPort = m_port->text().trimmed().toInt();
+
+                const auto reply = QMessageBox::question(
+                    this,
+                    "Server not reachable",
+                    QString("No VNC server responding on remote port %1.\n\nStart it via SSH?")
+                        .arg(remoteVncPort),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::Yes
+                    );
+
+                m_serverStartDialogOpen = false;
+
+                if (reply != QMessageBox::Yes)
+                    return;
+
+                // Make sure the previous failed attempt is fully torn down
+                if (m_tunnel)
+                    m_tunnel->stopTunnel();
+
+                m_client->disconnectFromHost();
+                m_connect->setEnabled(false);
+                m_disconnect->setEnabled(false);
+
+                startServerViaSshAndRetry(m_host->text().trimmed(), remoteVncPort);
+            });
+
     // ── Profiles ───────────────────────────────────────────────────────────────
 
     connect(m_profiles, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -464,6 +543,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     QSettings s = makeSettings();
     m_savePass->setChecked(s.value("ui/save_password", false).toBool());
+
 }
 
 MainWindow::~MainWindow() = default;
@@ -521,6 +601,9 @@ void MainWindow::loadProfileToFields(const QString& profileName) {
     const int     sshPort     = s.value("ssh/port", 22).toInt();
     const QString sshKey      = s.value("ssh/key", "").toString();
 
+    const int serverFps   = s.value("server/fps", 60).toInt();
+
+
     s.endGroup();
     s.endGroup();
 
@@ -536,6 +619,8 @@ void MainWindow::loadProfileToFields(const QString& profileName) {
     if (m_sshUser)   m_sshUser->setText(sshUser);
     if (m_sshPort)   m_sshPort->setText(QString::number(sshPort));
     if (m_sshKeyPath)m_sshKeyPath->setText(sshKey);
+
+    if (m_serverFps) m_serverFps->setText(QString::number(serverFps));
 }
 
 void MainWindow::saveFieldsToProfile(const QString& profileName) {
@@ -555,6 +640,8 @@ void MainWindow::saveFieldsToProfile(const QString& profileName) {
 
     s.endGroup();
     s.endGroup();
+
+    if (m_serverFps) s.setValue("server/fps", m_serverFps->text().trimmed().toInt());
 
     s.setValue("ui/last_profile", profileName);
 }
@@ -609,6 +696,8 @@ void MainWindow::onSaveProfileClicked() {
         if (m_sshPass && !m_sshPass->text().isEmpty())
             saveSshPasswordForProfile(name, m_sshPass->text());
     }
+
+    s.setValue("ui/save_password", m_savePass->isChecked());
 
     loadProfilesIntoCombo();
     for (int i = 0; i < m_profiles->count(); ++i) {
@@ -697,9 +786,71 @@ void MainWindow::onConnectClicked() {
     m_client->connectToHost(host, vncPort, vncPass, qualityIndex);
 }
 
-void MainWindow::onDisconnectClicked() {
+void MainWindow::onDisconnectClicked()
+{
+    const auto choice = QMessageBox::question(
+        this,
+        "Disconnect",
+        "Would you like to shut down the server?\n\n",
+        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+        QMessageBox::Yes
+        );
+
+    if (choice == QMessageBox::Cancel)
+        return;
+
+    const bool stopServer = (choice == QMessageBox::Yes);
+
+    // Always disconnect the client first
     m_client->disconnectFromHost();
-    if (m_tunnel) m_tunnel->stopTunnel();
+    if (m_tunnel)
+        m_tunnel->stopTunnel();
+
+    if (!stopServer)
+        return;
+
+    // --- Stop remote server via SSH ---
+    const QString sshHost = m_host->text().trimmed();
+    const QString sshUser = m_sshUser->text().trimmed();
+    const int sshPort = m_sshPort->text().trimmed().toInt();
+    const QString keyPath = m_sshKeyPath->text().trimmed();
+    const QString passFallback = m_sshPass->text();
+
+    QString serverPath = m_serverExePath.trimmed();
+    if (serverPath.isEmpty())
+        serverPath = "/home/" + sshUser + "/bin/VividVNCServer";
+
+    QString cmd = QString(
+                      "bash -lc 'pkill -f \"%1\"'"
+                      ).arg(serverPath);
+
+    auto* th = new QThread(this);
+    auto* w  = new SshCommandWorker();
+    w->moveToThread(th);
+
+    connect(th, &QThread::finished, w, &QObject::deleteLater);
+    connect(th, &QThread::finished, th, &QObject::deleteLater);
+
+    w->setConnectionParams(sshHost, sshPort, sshUser, keyPath, passFallback);
+    w->setCommand(cmd);
+
+    connect(th, &QThread::started, w, &SshCommandWorker::start);
+
+    connect(w, &SshCommandWorker::finished, this,
+            [this](bool ok, const QString& output) {
+
+                if (!ok) {
+                    QMessageBox::warning(this, "Server stop failed", output);
+                    return;
+                }
+
+                if (!output.isEmpty())
+                    appLogLine("SSH stop output: " + output);
+
+                m_status->setText("Remote server stopped.");
+            });
+
+    th->start();
 }
 
 // ── Keychain helpers ───────────────────────────────────────────────────────────
@@ -774,4 +925,98 @@ void MainWindow::deleteSshPasswordForProfile(const QString& profileName) {
     job->setKey(keychainKeyForSshPass(profileName));
     connect(job, &QKeychain::Job::finished, this, [job]() { Q_UNUSED(job); });
     job->start();
+}
+
+
+void MainWindow::startServerViaSshAndRetry(const QString& host, int vncPort)
+{
+    Q_UNUSED(host);
+
+    if (m_serverStartInProgress)
+        return;
+
+    m_serverStartInProgress = true;
+
+    const QString sshHost = m_host->text().trimmed();
+    const QString sshUser = m_sshUser->text().trimmed();
+    const int sshPort = m_sshPort->text().trimmed().toInt();
+    const QString keyPath = m_sshKeyPath->text().trimmed();
+    const QString passFallback = m_sshPass->text();
+
+    const int serverPort = vncPort;
+    int serverFps = m_serverFps ? m_serverFps->text().trimmed().toInt() : 30;
+    if (serverFps <= 0)
+        serverFps = 30;
+
+    QString serverPath = m_serverExePath.trimmed();
+    if (serverPath.isEmpty())
+        serverPath = "/home/" + sshUser + "/bin/VividVNCServer";
+
+    QString cmd = QString(
+                      "bash -lc '"
+                      "export DISPLAY=:0; "
+                      "export XAUTHORITY=/home/%1/.Xauthority; "
+                      "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
+                      "nohup %2 --autostart --port %3 --fps %4"
+                      ).arg(sshUser, serverPath)
+                      .arg(serverPort)
+                      .arg(serverFps);
+
+    if (m_pass && !m_pass->text().isEmpty()) {
+        QString escaped = m_pass->text();
+        escaped.replace("\\", "\\\\");
+        escaped.replace("\"", "\\\"");
+        cmd += QString(" --require-password --password \"%1\"").arg(escaped);
+    }
+
+    cmd += " > ~/.vividvncserver.log 2>&1 < /dev/null &'";
+
+    auto* th = new QThread(this);
+    auto* w  = new SshCommandWorker();
+    w->moveToThread(th);
+
+    // Let Qt clean these up when the thread finishes
+    connect(th, &QThread::finished, w, &QObject::deleteLater);
+    connect(th, &QThread::finished, th, &QObject::deleteLater);
+
+    w->setConnectionParams(sshHost, sshPort, sshUser, keyPath, passFallback);
+    w->setCommand(cmd);
+
+    connect(th, &QThread::started, w, &SshCommandWorker::start);
+
+    QPointer<MainWindow> self(this);
+
+    connect(w, &SshCommandWorker::finished, this,
+            [self, th](bool ok, const QString& output) {
+
+                if (!self) {
+                    th->quit();
+                    return;
+                }
+
+                self->m_serverStartInProgress = false;
+
+                if (!ok) {
+                    QMessageBox::warning(self, "SSH: start server failed", output);
+                    self->m_connect->setEnabled(true);
+                    self->m_disconnect->setEnabled(false);
+                    th->quit();
+                    return;
+                }
+
+                if (!output.isEmpty())
+                    appLogLine("SSH start output: " + output);
+
+                self->m_status->setText("Starting remote server...");
+
+                // Retry cleanly after a short delay
+                QTimer::singleShot(1500, self, [self]() {
+                    if (!self) return;
+                    self->onConnectClicked();
+                });
+
+                th->quit();
+            });
+
+    th->start();
 }

@@ -11,7 +11,9 @@
 #include <QFrame>
 #include <QMouseEvent>
 #include <algorithm>
-
+#include <QMessageBox>
+#include <QSettings>
+#include  <QInputDialog>
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,28 +111,35 @@ RemoteBrowserDialog::RemoteBrowserDialog(QWidget* parent) : QDialog(parent) {
     // ── Splitter: sidebar | file tree ─────────────────────────────────────────
     m_splitter = new QSplitter(Qt::Horizontal);
 
-    // Sidebar bookmarks
-    m_sidebar = new QListWidget;
-    m_sidebar->setMaximumWidth(160);
-    m_sidebar->setMinimumWidth(120);
-    m_sidebar->setFrameShape(QFrame::NoFrame);
-    m_sidebar->setStyleSheet(
-        "QListWidget { background: palette(window); }"
-        "QListWidget::item { padding: 4px 8px; border-radius: 4px; }"
-        "QListWidget::item:selected { background: palette(highlight); "
-        "                             color: palette(highlighted-text); }");
+    
+// Sidebar bookmarks (built-in + persistent custom)
+m_sidebar = new QListWidget;
+m_sidebar->setMaximumWidth(180);
+m_sidebar->setMinimumWidth(120);
+m_sidebar->setFrameShape(QFrame::NoFrame);
+m_sidebar->setContextMenuPolicy(Qt::CustomContextMenu);
+m_sidebar->setStyleSheet(
+    "QListWidget { background: palette(window); }"
+    "QListWidget::item { padding: 4px 8px; border-radius: 4px; }"
+    "QListWidget::item:selected { background: palette(highlight)"
+    );
 
-    auto addBookmark = [&](const QString& label, const QString& path,
-                           QStyle::StandardPixmap icon) {
-        auto* it = new QListWidgetItem(
-            QApplication::style()->standardIcon(icon), label);
-        it->setData(Qt::UserRole, path);
-        m_sidebar->addItem(it);
-    };
-    addBookmark("Root",      "/",                 QStyle::SP_DriveHDIcon);
-    addBookmark("Home",      "/root",             QStyle::SP_DirHomeIcon);
-    addBookmark("tmp",       "/tmp",              QStyle::SP_DirIcon);
-    addBookmark("Downloads", "/root/Downloads",   QStyle::SP_DirIcon);
+auto addBuiltin = [&](QListWidgetItem*& outItem,
+                      const QString& label,
+                      const QString& path,
+                      QStyle::StandardPixmap icon) {
+    outItem = new QListWidgetItem(QApplication::style()->standardIcon(icon), label);
+    outItem->setData(kRolePath, path);
+    outItem->setData(kRoleIsCustom, false);
+    m_sidebar->addItem(outItem);
+};
+
+addBuiltin(m_bmRoot,      "Root",      "/",      QStyle::SP_DriveHDIcon);
+addBuiltin(m_bmHome,      "Home",      "/home",  QStyle::SP_DirHomeIcon);
+addBuiltin(m_bmTmp,       "tmp",       "/tmp",   QStyle::SP_DirIcon);
+addBuiltin(m_bmDownloads, "Downloads", "/home",  QStyle::SP_DirIcon);
+
+// Custom bookmarks will be loaded after setConnectionParams() sets host/user.
 
     // File tree — 3 columns (no permissions since worker doesn't provide them)
     m_tree = new QTreeWidget;
@@ -139,7 +148,7 @@ RemoteBrowserDialog::RemoteBrowserDialog(QWidget* parent) : QDialog(parent) {
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_tree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_tree->setSortingEnabled(true);
+    m_tree->setSortingEnabled(false);
     m_tree->setRootIsDecorated(false);
     m_tree->setAlternatingRowColors(true);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -262,6 +271,11 @@ void RemoteBrowserDialog::setConnectionParams(const QString& host, int port,
         else if (!m_user.isEmpty())
             m_currentDir = "/home/" + m_user;
     }
+
+
+    // Now that we know who we're logged in as, update built-in bookmarks and load persistent custom ones
+    updateBuiltinBookmarks();
+    loadCustomBookmarks();
 }
 
 void RemoteBrowserDialog::setStartDir(const QString& dir) {
@@ -425,15 +439,15 @@ void RemoteBrowserDialog::populateTree(const QString& dir,
         row->setText(0, e.name);
         row->setText(1, e.isDir ? QString() : humanSize(e.size));
         row->setText(2, e.isDir ? "Folder" : e.name.section('.', -1).toUpper());
-        row->setData(0, Qt::UserRole,     e.name);
-        row->setData(0, Qt::UserRole + 1, e.isDir);
-        row->setData(1, Qt::UserRole, e.isDir ? quint64(0) : e.size);
+        row->setData(0, kRolePath, e.name);
+        row->setData(0, kRoleIsDir, e.isDir);
+        row->setData(1, kRolePath, e.isDir ? quint64(0) : e.size);
 
         e.isDir ? ++folderCount : ++fileCount;
     }
 
-    m_tree->setSortingEnabled(true);
-    m_tree->sortByColumn(0, Qt::AscendingOrder);
+    m_tree->setSortingEnabled(false);
+    
 
     m_status->setText(QString("%1 folder(s), %2 file(s) in %3")
                           .arg(folderCount).arg(fileCount).arg(dir));
@@ -448,15 +462,19 @@ void RemoteBrowserDialog::onError(const QString& msg) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void RemoteBrowserDialog::onItemActivated(QTreeWidgetItem* item, int /*column*/) {
-    const QString name  = item->data(0, Qt::UserRole).toString();
-    const bool    isDir = item->data(0, Qt::UserRole + 1).toBool();
+    if (!item) return;
 
-    if (isDir)
+    const QString name  = item->data(0, kRolePath).toString();
+    const bool    isDir = item->data(0, kRoleIsDir).toBool();
+
+    if (isDir) {
         navigateTo(joinPath(m_currentDir, name));
-    else {
-        m_selected = joinPath(m_currentDir, name);
-        accept();
+        return;
     }
+
+    // For files, reuse the same path as the Select/Download button so we get confirmation.
+    m_tree->setCurrentItem(item);
+    acceptSelection();
 }
 
 void RemoteBrowserDialog::onItemSelectionChanged() {
@@ -466,23 +484,40 @@ void RemoteBrowserDialog::onItemSelectionChanged() {
         m_status->setText(QString("%1 item(s)").arg(m_tree->topLevelItemCount()));
         return;
     }
-    const bool isDir = sel.first()->data(0, Qt::UserRole + 1).toBool();
+    const bool isDir = sel.first()->data(0, kRoleIsDir).toBool();
     m_select->setEnabled(!isDir);
     if (!isDir)
         m_status->setText(joinPath(m_currentDir,
-                                   sel.first()->data(0, Qt::UserRole).toString()));
+                                   sel.first()->data(0, kRolePath).toString()));
 }
 
 void RemoteBrowserDialog::acceptSelection() {
     auto* item = m_tree->currentItem();
     if (!item) return;
 
-    const bool    isDir = item->data(0, Qt::UserRole + 1).toBool();
-    const QString name  = item->data(0, Qt::UserRole).toString();
+    const bool    isDir = item->data(0, kRoleIsDir).toBool();
+    const QString name  = item->data(0, kRolePath).toString();
 
     if (isDir) { navigateTo(joinPath(m_currentDir, name)); return; }
 
-    m_selected = joinPath(m_currentDir, name);
+    const QString remotePath = joinPath(m_currentDir, name);
+    const quint64 bytes = item->data(1, kRolePath).toULongLong();
+
+    const QString msg =
+        "Download this file? Remote:" + remotePath + (bytes ? ("Size: " + humanSize(bytes)) : QString());
+
+    const auto reply = QMessageBox::question(
+        this,
+        "Confirm download",
+        msg,
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No
+    );
+
+    if (reply != QMessageBox::Yes)
+        return;
+
+    m_selected = remotePath;
     accept();
 }
 
@@ -495,6 +530,39 @@ void RemoteBrowserDialog::showContextMenu(const QPoint& pos) {
 
     auto* item = m_tree->itemAt(pos);
     QMenu menu(this);
+
+
+// ── Bookmarks ─────────────────────────────────────────────────
+QAction* addBmCurrent = menu.addAction("Add current folder to bookmarks…");
+connect(addBmCurrent, &QAction::triggered, this, [this]() {
+    const QString path = m_currentDir.isEmpty() ? "/" : m_currentDir;
+    bool ok = false;
+    const QString label = QInputDialog::getText(
+        this, "Add Bookmark", "Name:",
+        QLineEdit::Normal, "Bookmark", &ok);
+    if (!ok || label.trimmed().isEmpty()) return;
+    addCustomBookmark(label.trimmed(), path);
+});
+
+if (item) {
+    const bool isDir = item->data(0, kRoleIsDir).toBool();
+    const QString name = item->data(0, kRolePath).toString();
+    if (isDir) {
+        QAction* addBmSel = menu.addAction("Add selected folder to bookmarks…");
+        connect(addBmSel, &QAction::triggered, this, [this, name]() {
+            const QString path = joinPath(m_currentDir, name);
+            bool ok = false;
+            const QString label = QInputDialog::getText(
+                this, "Add Bookmark", "Name:",
+                QLineEdit::Normal, name, &ok);
+            if (!ok || label.trimmed().isEmpty()) return;
+            addCustomBookmark(label.trimmed(), path);
+        });
+    }
+}
+
+menu.addSeparator();
+
 
 
     QAction* hiddenAct = menu.addAction(m_showHidden ? "Hide Hidden Files" : "Show Hidden Files");
@@ -510,8 +578,8 @@ void RemoteBrowserDialog::showContextMenu(const QPoint& pos) {
 
 
     if (item) {
-        const bool    isDir = item->data(0, Qt::UserRole + 1).toBool();
-        const QString name  = item->data(0, Qt::UserRole).toString();
+        const bool    isDir = item->data(0, kRoleIsDir).toBool();
+        const QString name  = item->data(0, kRolePath).toString();
         const QString full  = joinPath(m_currentDir, name);
 
         if (isDir) {
@@ -521,7 +589,7 @@ void RemoteBrowserDialog::showContextMenu(const QPoint& pos) {
         } else {
             menu.addAction(
                 QApplication::style()->standardIcon(QStyle::SP_ArrowDown),
-                "Download", this, [this, full]() { m_selected = full; accept(); });
+                "Download", this, [this, item]() { if (item) { m_tree->setCurrentItem(item); acceptSelection(); } });
         }
         menu.addSeparator();
         menu.addAction("Copy Path", this, [full]() {
@@ -542,4 +610,206 @@ void RemoteBrowserDialog::toggleHiddenFiles() {
     m_btnHidden->setToolTip(m_showHidden ? "Hide Hidden Files" : "Show Hidden Files");
     if (!m_lastEntries.isEmpty())
         populateTree(m_currentDir, m_lastEntries);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Persistent bookmarks
+// ─────────────────────────────────────────────────────────────────────────────
+
+QString RemoteBrowserDialog::makeBookmarkSettingsKey() const
+{
+    // key per connection profile so each host/user keeps its own bookmarks
+    return QString("%1:%2:%3").arg(m_host).arg(m_port).arg(m_user);
+}
+
+void RemoteBrowserDialog::updateBuiltinBookmarks()
+{
+    // Compute home dir from username (simple heuristic)
+    QString home = "/home";
+    if (m_user == "root") home = "/root";
+    else if (!m_user.isEmpty()) home = "/home/" + m_user;
+
+    if (m_bmRoot)      m_bmRoot->setData(kRolePath, "/");
+    if (m_bmHome)      m_bmHome->setData(kRolePath, home);
+    if (m_bmTmp)       m_bmTmp->setData(kRolePath, "/tmp");
+
+    // Downloads: try common casing; store as QStringList so click handler can fall back
+    if (m_bmDownloads) {
+        if (home == "/root") {
+            // root often doesn't have Downloads; still provide a sane default
+            m_bmDownloads->setData(kRolePath, QStringList({"/root/Downloads", "/root/downloads", "/root"}));
+        } else if (home.startsWith("/home/")) {
+            m_bmDownloads->setData(kRolePath, QStringList({home + "/Downloads", home + "/downloads", home}));
+        } else {
+            m_bmDownloads->setData(kRolePath, QStringList({"/home", "/tmp"}));
+        }
+    }
+}
+
+void RemoteBrowserDialog::clearCustomBookmarkItems()
+{
+    // Remove sidebar items that are marked as custom
+    for (int i = m_sidebar->count() - 1; i >= 0; --i) {
+        QListWidgetItem* it = m_sidebar->item(i);
+        if (it && it->data(kRoleIsCustom).toBool()) {
+            delete m_sidebar->takeItem(i);
+        }
+    }
+}
+
+void RemoteBrowserDialog::loadCustomBookmarks()
+{
+    if (!m_sidebar) return;
+    clearCustomBookmarkItems();
+    m_customBookmarks.clear();
+
+    const QString key = makeBookmarkSettingsKey();
+    if (key.trimmed().isEmpty() || m_host.isEmpty() || m_user.isEmpty()) {
+        // We can still browse without bookmarks; we'll load once params are set.
+        return;
+    }
+
+    QSettings s;
+    s.beginGroup("RemoteBrowserDialog");
+    s.beginGroup("Bookmarks");
+    s.beginGroup(key);
+
+    const int n = s.beginReadArray("items");
+    for (int i = 0; i < n; ++i) {
+        s.setArrayIndex(i);
+        const QString label = s.value("label").toString();
+        const QString path  = s.value("path").toString();
+        if (label.isEmpty() || path.isEmpty()) continue;
+
+        m_customBookmarks.push_back({label, path});
+
+        auto* it = new QListWidgetItem(QApplication::style()->standardIcon(QStyle::SP_DirIcon), label);
+        it->setData(kRolePath, path);
+        it->setData(kRoleIsCustom, true);
+        m_sidebar->addItem(it);
+    }
+    s.endArray();
+
+    s.endGroup(); // key
+    s.endGroup(); // Bookmarks
+    s.endGroup(); // RemoteBrowserDialog
+}
+
+void RemoteBrowserDialog::saveCustomBookmarks() const
+{
+    const QString key = makeBookmarkSettingsKey();
+    if (key.trimmed().isEmpty() || m_host.isEmpty() || m_user.isEmpty())
+        return;
+
+    QSettings s;
+    s.beginGroup("RemoteBrowserDialog");
+    s.beginGroup("Bookmarks");
+    s.beginGroup(key);
+
+    s.remove(""); // wipe group first so deletes persist
+    s.beginWriteArray("items", m_customBookmarks.size());
+    for (int i = 0; i < m_customBookmarks.size(); ++i) {
+        s.setArrayIndex(i);
+        s.setValue("label", m_customBookmarks[i].label);
+        s.setValue("path",  m_customBookmarks[i].path);
+    }
+    s.endArray();
+
+    s.endGroup();
+    s.endGroup();
+    s.endGroup();
+}
+
+void RemoteBrowserDialog::addCustomBookmark(const QString& label, const QString& path)
+{
+    const QString cleanLabel = label.trimmed();
+    const QString cleanPath  = path.trimmed();
+    if (cleanLabel.isEmpty() || cleanPath.isEmpty() || !m_sidebar) return;
+
+    // de-dupe by path
+    for (const auto& b : m_customBookmarks) {
+        if (b.path == cleanPath) return;
+    }
+
+    m_customBookmarks.push_back({cleanLabel, cleanPath});
+
+    auto* it = new QListWidgetItem(QApplication::style()->standardIcon(QStyle::SP_DirIcon), cleanLabel);
+    it->setData(kRolePath, cleanPath);
+    it->setData(kRoleIsCustom, true);
+    m_sidebar->addItem(it);
+
+    saveCustomBookmarks();
+}
+
+void RemoteBrowserDialog::showSidebarContextMenu(const QPoint& pos)
+{
+    if (!m_sidebar) return;
+
+    QListWidgetItem* clicked = m_sidebar->itemAt(pos);
+
+    QMenu menu(this);
+
+    QAction* addCurrent = menu.addAction("Add current folder to bookmarks…");
+    connect(addCurrent, &QAction::triggered, this, [this]() {
+        const QString suggested = m_currentDir.isEmpty() ? "/" : m_currentDir;
+        bool ok = false;
+        const QString label = QInputDialog::getText(this, "Add Bookmark", "Name:", QLineEdit::Normal, "Bookmark", &ok);
+        if (!ok || label.trimmed().isEmpty()) return;
+        addCustomBookmark(label, suggested);
+    });
+
+    if (clicked && clicked->data(kRoleIsCustom).toBool()) {
+        menu.addSeparator();
+
+        QAction* rename = menu.addAction("Rename…");
+        connect(rename, &QAction::triggered, this, [this, clicked]() {
+            const int idx = m_sidebar->row(clicked);
+            if (idx < 0) return;
+
+            bool ok = false;
+            const QString newName = QInputDialog::getText(
+                this, "Rename Bookmark", "Name:",
+                QLineEdit::Normal, clicked->text(), &ok);
+            if (!ok || newName.trimmed().isEmpty()) return;
+
+            clicked->setText(newName.trimmed());
+
+            // Update model list
+            const QString path = clicked->data(kRolePath).toString();
+            for (auto& b : m_customBookmarks) {
+                if (b.path == path) {
+                    b.label = newName.trimmed();
+                    break;
+                }
+            }
+            saveCustomBookmarks();
+        });
+
+        QAction* remove = menu.addAction("Remove");
+        connect(remove, &QAction::triggered, this, [this, clicked]() {
+            const QString label = clicked->text();
+            const auto reply = QMessageBox::question(
+                this, "Remove bookmark",
+                "Remove bookmark \"" + label + "\"?",
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (reply != QMessageBox::Yes) return;
+
+            const QString path = clicked->data(kRolePath).toString();
+
+            // Remove from model list
+            for (int i = 0; i < m_customBookmarks.size(); ++i) {
+                if (m_customBookmarks[i].path == path) {
+                    m_customBookmarks.remove(i);
+                    break;
+                }
+            }
+            // Remove from UI
+            delete m_sidebar->takeItem(m_sidebar->row(clicked));
+
+            saveCustomBookmarks();
+        });
+    }
+
+    menu.exec(m_sidebar->viewport()->mapToGlobal(pos));
 }

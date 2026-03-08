@@ -20,6 +20,7 @@ public:
     ~MainWindow() override;
 
 private slots:
+    void startServerViaSshAndRetry(const QString& host, int vncPort);
     void onConnectClicked();
     void onDisconnectClicked();
 
@@ -71,6 +72,12 @@ private:
     QLineEdit* m_sshPort { nullptr };
     QLineEdit* m_sshKeyPath { nullptr };
     SshTunnel* m_tunnel { nullptr };
+
+    QLineEdit* m_serverFps { nullptr };
+
+    QString m_serverExePath;
+    bool m_serverStartDialogOpen = false;
+    bool m_serverStartInProgress = false;
 
     // --- File transfer UI ---
     QLineEdit*   m_remotePath = nullptr;

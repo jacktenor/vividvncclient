@@ -23,18 +23,21 @@ public:
                      const QString& remotePath);
 
 public slots:
+    void setOverwriteDecision(bool overwrite);
     void start();
     void cancel();
 
 signals:
+    void overwritePrompt(const QString& remotePath, quint64 existingSize);
+    void finished(bool ok, const QString& err); // you already have this
     void progress(qint64 done, qint64 total);
     void status(const QString& msg);
-    void finished(bool ok, const QString& errorOrEmpty);
 
 private:
+    bool m_overwriteDecisionReady = false;
+    bool m_overwriteApproved = false;
     bool runUpload(QString& err);
     bool runDownload(QString& err);
-
     bool connectAndAuth(QString& err);
     void disconnect();
 
@@ -44,11 +47,9 @@ private:
     QString m_user;
     QString m_keyPath;
     QString m_passwordFallback;
-
     Direction m_dir = Direction::Upload;
     QString   m_localPath;
     QString   m_remotePath;
-
     QAtomicInt m_cancelled {0};
 
     // IMPORTANT:
